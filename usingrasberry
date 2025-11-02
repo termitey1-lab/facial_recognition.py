@@ -1,0 +1,104 @@
+import cv2
+import os
+import numpy as np
+import pickle
+from deepface import DeepFace
+from flask import Flask, request, jsonify
+
+# Directory to store known faces
+DATASET_DIR = "known_faces"
+ENCODINGS_FILE = "face_encodings.pkl"
+
+# Load or initialize dataset
+def load_known_faces():
+    if os.path.exists(ENCODINGS_FILE):
+        with open(ENCODINGS_FILE, "rb") as f:
+            return pickle.load(f)
+    return {}
+
+def save_known_faces(data):
+    with open(ENCODINGS_FILE, "wb") as f:
+        pickle.dump(data, f)
+
+# Add a new person to the dataset
+def add_person(name, image_path):
+    known_faces = load_known_faces()
+    try:
+        encoding = DeepFace.represent(img_path=image_path, enforce_detection=True)[0]["embedding"]
+        known_faces[name] = encoding
+        save_known_faces(known_faces)
+        print(f"✅ Added {name} to dataset.")
+    except Exception as e:
+        print(f"Error adding person: {e}")
+
+# Compare live face to known faces
+def recognize_face(frame):
+    try:
+        rep = DeepFace.represent(frame, enforce_detection=True)[0]["embedding"]
+        known_faces = load_known_faces()
+        for name, encoding in known_faces.items():
+            distance = np.linalg.norm(np.array(rep) - np.array(encoding))
+            if distance < 0.6:  # Threshold for match
+                return name
+        return "Unknown"
+    except Exception as e:
+        return f"Detection error: {e}"
+
+# Live camera recognition
+def recognize_face_from_camera():
+    cam = cv2.VideoCapture(0)
+    if not cam.isOpened():
+        print("Error: Could not open camera.")
+        return
+
+    print("Press 'q' to quit the camera stream.")
+    while True:
+        ret, frame = cam.read()
+        if not ret:
+            print("Failed to capture frame. Exiting...")
+            break
+
+        name = recognize_face(frame)
+        try:
+            result = DeepFace.analyze(frame, actions=['age', 'gender', 'emotion'], enforce_detection=False)[0]
+            info = f"{name} | Age: {result['age']} | Gender: {result['dominant_gender']} | Emotion: {result['dominant_emotion']}"
+        except:
+            info = f"{name} | No attributes detected"
+
+        cv2.putText(frame, info, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.imshow('Facial Recognition', frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cam.release()
+    cv2.destroyAllWindows()
+
+# Flask API for remote access
+app = Flask(__name__)
+
+@app.route("/add_person", methods=["POST"])
+def api_add_person():
+    name = request.form.get("name")
+    image_path = request.form.get("image_path")
+    if not name or not image_path:
+        return jsonify({"error": "Missing name or image_path"}), 400
+    add_person(name, image_path)
+    return jsonify({"status": f"{name} added successfully"})
+
+@app.route("/recognize", methods=["POST"])
+def api_recognize():
+    file = request.files.get("image")
+    if not file:
+        return jsonify({"error": "No image uploaded"}), 400
+    npimg = np.frombuffer(file.read(), np.uint8)
+    frame = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
+    name = recognize_face(frame)
+    return jsonify({"recognized": name})
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "web":
+        app.run(host="0.0.0.0", port=5000)
+    else:
+        recognize_face_from_camera()
